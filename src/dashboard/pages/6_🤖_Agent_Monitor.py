@@ -1,12 +1,12 @@
 """Agent Monitor page - Visualize workflow and control agents."""
 
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 import streamlit as st
-import json
 from datetime import datetime
 
 from src.database.connection import init_db
@@ -22,7 +22,86 @@ except Exception:
 
 config = Config()
 
-# Initialize session state
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _run_workflow_thread():
+    """Run the workflow in a background thread and update session state."""
+    from src.graph.workflow import run_workflow
+    from src.database.connection import get_db
+    from src.database.repositories.user_repository import UserRepository
+
+    try:
+        # Build user profile from DB
+        user_profile = {}
+        try:
+            with get_db() as session:
+                user_repo = UserRepository(session)
+                user = user_repo.get_default_user()
+                if user:
+                    user_profile = {
+                        "name": user.name,
+                        "email": user.email,
+                        "phone": user.phone,
+                        "skills": user.skills or [],
+                        "experience_years": user.experience_years or 0,
+                    }
+        except Exception:
+            pass
+
+        # Build search criteria from config
+        search_criteria = {
+            "keywords": config.search_titles,
+            "location": ", ".join(config.search_locations),
+            "max_jobs": config.max_jobs_per_search,
+        }
+
+        result = run_workflow(
+            user_profile=user_profile,
+            search_criteria=search_criteria,
+        )
+
+        st.session_state.workflow_state = {
+            "status": "completed",
+            "current_step": result.get("current_step", "done"),
+            "scraped_jobs": len(result.get("scraped_jobs", [])),
+            "matched_jobs": len(result.get("matched_jobs", [])),
+            "pending_applications": len(result.get("pending_applications", [])),
+            "submitted_applications": len(result.get("submitted_applications", [])),
+            "feed_posts": len(result.get("feed_posts", [])),
+            "errors": len(result.get("errors", [])),
+        }
+        st.session_state.workflow_status = "completed"
+        st.session_state.workflow_running = False
+        st.session_state.activity_log.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "level": "INFO",
+            "message": f"Workflow completed. Scraped {len(result.get('scraped_jobs', []))} jobs, "
+                       f"matched {len(result.get('matched_jobs', []))}, "
+                       f"submitted {len(result.get('submitted_applications', []))} applications.",
+        })
+
+    except Exception as e:
+        st.session_state.workflow_status = "failed"
+        st.session_state.workflow_running = False
+        st.session_state.workflow_errors.append({
+            "step": "workflow",
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "message": str(e),
+        })
+        st.session_state.activity_log.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "level": "ERROR",
+            "message": f"Workflow failed: {e}",
+        })
+
+
+# ---------------------------------------------------------------------------
+# Session state init
+# ---------------------------------------------------------------------------
+
 if "workflow_running" not in st.session_state:
     st.session_state.workflow_running = False
 if "workflow_status" not in st.session_state:
@@ -35,17 +114,22 @@ if "workflow_state" not in st.session_state:
     st.session_state.workflow_state = {}
 if "agent_stats" not in st.session_state:
     st.session_state.agent_stats = {
+        "feed_scraper": {"processed": 0, "status": "idle", "last_activity": None},
         "scraper": {"processed": 0, "status": "idle", "last_activity": None},
         "matcher": {"processed": 0, "status": "idle", "last_activity": None},
         "customizer": {"processed": 0, "status": "idle", "last_activity": None},
         "applier": {"processed": 0, "status": "idle", "last_activity": None},
     }
 
+# ---------------------------------------------------------------------------
 # Workflow Pipeline Visualization
+# ---------------------------------------------------------------------------
+
 st.subheader("Workflow Pipeline")
 
 agents_info = [
-    ("scraper", "LinkedIn Scraper", "Scrape jobs from LinkedIn"),
+    ("feed_scraper", "Feed Scanner", "Scan LinkedIn feed for hiring posts"),
+    ("scraper", "Multi-Platform Scraper", "Scrape jobs from all platforms"),
     ("matcher", "Job Matcher", "Score jobs with AI"),
     ("customizer", "Resume Customizer", "Tailor resumes & cover letters"),
     ("applier", "Application Submitter", "Submit Easy Apply"),
@@ -67,12 +151,12 @@ for i, (key, name, desc) in enumerate(agents_info):
         else:
             st.caption("No activity yet")
 
-        if i < len(agents_info) - 1:
-            st.markdown("")
-
 st.markdown("---")
 
+# ---------------------------------------------------------------------------
 # Control Panel
+# ---------------------------------------------------------------------------
+
 st.subheader("Control Panel")
 ctrl_cols = st.columns(5)
 
@@ -85,6 +169,11 @@ with ctrl_cols[0]:
             "level": "INFO",
             "message": "Workflow started",
         })
+
+        # Actually launch the workflow in a background thread
+        thread = threading.Thread(target=_run_workflow_thread, daemon=True)
+        thread.start()
+
         st.success("Workflow started! Monitor progress below.")
         st.rerun()
 
@@ -119,6 +208,10 @@ with ctrl_cols[3]:
             "level": "INFO",
             "message": "Workflow restarted",
         })
+
+        thread = threading.Thread(target=_run_workflow_thread, daemon=True)
+        thread.start()
+
         st.success("Workflow restarted!")
         st.rerun()
 
@@ -132,7 +225,10 @@ with ctrl_cols[4]:
 
 st.markdown("---")
 
+# ---------------------------------------------------------------------------
 # Activity Log
+# ---------------------------------------------------------------------------
+
 st.subheader("Activity Log")
 log_container = st.container()
 with log_container:
@@ -149,7 +245,10 @@ with log_container:
 
 st.markdown("---")
 
-# State Viewer
+# ---------------------------------------------------------------------------
+# State & Errors
+# ---------------------------------------------------------------------------
+
 col_state, col_errors = st.columns(2)
 
 with col_state:
@@ -162,6 +261,7 @@ with col_state:
         "matched_jobs": 0,
         "pending_applications": 0,
         "submitted_applications": 0,
+        "feed_posts": 0,
     }
     st.json(state_data)
 
@@ -183,7 +283,10 @@ with col_errors:
 
 st.markdown("---")
 
+# ---------------------------------------------------------------------------
 # Performance Metrics
+# ---------------------------------------------------------------------------
+
 st.subheader("Performance Metrics")
 perf_cols = st.columns(4)
 with perf_cols[0]:

@@ -12,7 +12,7 @@ os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
 os.environ["LINKEDIN_EMAIL"] = "test@example.com"
 os.environ["LINKEDIN_PASSWORD"] = "testpassword"
 
-from src.database.models import Base, User, LinkedInJob, Application, Resume
+from src.database.models import Base, User, LinkedInJob, Application, Resume, LinkedInFeedPost
 from src.utils.config import Config
 
 
@@ -158,6 +158,42 @@ def sample_resume(db_session, sample_user) -> Resume:
     db_session.add(resume)
     db_session.commit()
     return resume
+
+
+@pytest.fixture
+def sample_feed_posts(db_session) -> list:
+    """Create sample feed posts for testing."""
+    posts = [
+        LinkedInFeedPost(
+            post_url="https://linkedin.com/feed/update/1",
+            author_name="John Recruiter",
+            author_profile_url="https://linkedin.com/in/johnrecruiter",
+            post_text="We are hiring a Gen AI Engineer! Join our amazing team.",
+            company_mentioned="AI Corp",
+            keywords_found=["hiring", "Gen AI"],
+            is_hiring_post=True,
+            likes=42,
+            comments=5,
+            status="new",
+            platform="linkedin_feed",
+        ),
+        LinkedInFeedPost(
+            post_url="https://linkedin.com/feed/update/2",
+            author_name="Jane HR",
+            author_profile_url="https://linkedin.com/in/janehr",
+            post_text="Looking for talented engineers to join our growing team.",
+            company_mentioned="Tech Startup",
+            keywords_found=["looking for"],
+            is_hiring_post=True,
+            likes=15,
+            comments=2,
+            status="new",
+            platform="linkedin_feed",
+        ),
+    ]
+    db_session.add_all(posts)
+    db_session.commit()
+    return posts
 
 
 @pytest.fixture

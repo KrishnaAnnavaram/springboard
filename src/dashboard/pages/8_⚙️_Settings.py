@@ -24,20 +24,65 @@ except Exception:
 
 config = Config()
 
-# LinkedIn Credentials
-st.subheader("LinkedIn Credentials")
-col1, col2 = st.columns(2)
-with col1:
-    li_email = st.text_input("LinkedIn Email", value=config.linkedin_email or "Not configured")
-    li_password = st.text_input("LinkedIn Password", type="password", placeholder="Enter new password to update")
-with col2:
-    st.markdown("**Session Status**")
-    st.markdown("⚪ Not connected")
-    if st.button("🔗 Test Connection"):
-        if config.linkedin_email and config.linkedin_password:
-            st.info("Connection test would launch browser in production. Credentials are configured.")
-        else:
-            st.warning("Please configure LinkedIn credentials in .env file.")
+# Platform Credentials & Status
+st.subheader("Platform Credentials")
+
+# LinkedIn
+with st.expander("LinkedIn", expanded=True):
+    li_col1, li_col2 = st.columns(2)
+    with li_col1:
+        li_email = st.text_input("LinkedIn Email", value=config.linkedin_email or "Not configured")
+        li_password = st.text_input("LinkedIn Password", type="password", placeholder="Enter new password to update")
+    with li_col2:
+        li_status = "🟢 Configured" if config.linkedin_email and config.linkedin_password else "🔴 Not configured"
+        st.markdown(f"**Status:** {li_status}")
+        if st.button("🔗 Test LinkedIn"):
+            if config.linkedin_email and config.linkedin_password:
+                st.info("Credentials are configured. Connection test requires browser.")
+            else:
+                st.warning("Configure LinkedIn credentials in .env file.")
+
+# Multi-platform status overview
+platforms_cfg = config.platforms_config
+platform_names = {
+    "linkedin": "LinkedIn",
+    "linkedin_feed": "LinkedIn Feed",
+    "dice": "Dice",
+    "indeed": "Indeed",
+    "monster": "Monster",
+    "handshake": "Handshake",
+    "glassdoor": "Glassdoor",
+    "ziprecruiter": "ZipRecruiter",
+}
+
+with st.expander("Multi-Platform Status", expanded=True):
+    plat_cols = st.columns(4)
+    for i, (key, display_name) in enumerate(platform_names.items()):
+        pcfg = platforms_cfg.get(key, {})
+        enabled = pcfg.get("enabled", False)
+        icon = "🟢" if enabled else "⚪"
+        with plat_cols[i % 4]:
+            st.markdown(f"{icon} **{display_name}**")
+            st.caption(f"Priority: {pcfg.get('priority', '-')} | {'Enabled' if enabled else 'Disabled'}")
+
+# Other platform credentials
+with st.expander("Dice Credentials"):
+    dice_col1, dice_col2 = st.columns(2)
+    with dice_col1:
+        st.text_input("Dice Email", value=os.getenv("DICE_EMAIL", "Not configured"), key="dice_email")
+        st.text_input("Dice Password", type="password", placeholder="Enter password", key="dice_pass")
+    with dice_col2:
+        dice_ok = bool(os.getenv("DICE_EMAIL")) and bool(os.getenv("DICE_PASSWORD"))
+        st.markdown(f"**Status:** {'🟢 Configured' if dice_ok else '🔴 Not configured'}")
+
+with st.expander("Indeed Credentials"):
+    ind_col1, ind_col2 = st.columns(2)
+    with ind_col1:
+        st.text_input("Indeed Email", value=os.getenv("INDEED_EMAIL", "Not configured"), key="indeed_email")
+        st.text_input("Indeed Password", type="password", placeholder="Enter password", key="indeed_pass")
+    with ind_col2:
+        st.markdown("**Note:** Indeed search does not require login.")
+        st.markdown("**Status:** 🟢 Search available")
 
 st.markdown("---")
 

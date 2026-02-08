@@ -96,6 +96,10 @@ class Config:
         return self._config.get("database", {})
 
     @property
+    def platforms_config(self) -> Dict[str, Any]:
+        return self._config.get("platforms", {})
+
+    @property
     def logging_config(self) -> Dict[str, Any]:
         return self._config.get("logging", {})
 

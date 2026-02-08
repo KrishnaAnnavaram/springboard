@@ -1,4 +1,4 @@
-"""Repository for LinkedInJob database operations."""
+"""Repository for job database operations (multi-platform)."""
 
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -6,24 +6,40 @@ from typing import List, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from src.database.models import LinkedInJob
+from src.database.models import LinkedInJob, LinkedInFeedPost
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class JobRepository:
-    """Data access layer for LinkedIn job postings."""
+    """Data access layer for job postings from all platforms."""
 
     def __init__(self, session: Session) -> None:
         self.session = session
 
     def create(self, **kwargs) -> LinkedInJob:
-        """Create a new job record."""
+        """Create a new job record.
+
+        For multi-platform support, if ``platform_job_id`` is provided
+        but ``linkedin_job_id`` is not, the latter is set automatically
+        using the pattern ``{platform}_{platform_job_id}``.
+        """
+        # Ensure linkedin_job_id is set for backward compatibility
+        if "linkedin_job_id" not in kwargs or not kwargs["linkedin_job_id"]:
+            platform = kwargs.get("platform", "linkedin")
+            pid = kwargs.get("platform_job_id", "")
+            if pid:
+                kwargs["linkedin_job_id"] = f"{platform}_{pid}"
+                kwargs.setdefault("platform_job_id", pid)
+            else:
+                kwargs.setdefault("linkedin_job_id", kwargs.get("job_url", str(datetime.utcnow().timestamp())))
+        kwargs.setdefault("platform", "linkedin")
+        kwargs.setdefault("job_url", "")
         job = LinkedInJob(**kwargs)
         self.session.add(job)
         self.session.flush()
-        logger.info("Created job: %s at %s", job.title, job.company)
+        logger.info("Created job: %s at %s [%s]", job.title, job.company, job.platform)
         return job
 
     def get_by_id(self, job_id: int) -> Optional[LinkedInJob]:
@@ -31,11 +47,33 @@ class JobRepository:
         return self.session.query(LinkedInJob).filter(LinkedInJob.id == job_id).first()
 
     def get_by_linkedin_id(self, linkedin_job_id: str) -> Optional[LinkedInJob]:
-        """Get a job by its LinkedIn job ID."""
+        """Get a job by its LinkedIn job ID (backward compatible)."""
         return (
             self.session.query(LinkedInJob)
             .filter(LinkedInJob.linkedin_job_id == linkedin_job_id)
             .first()
+        )
+
+    def get_by_platform_job_id(self, platform_job_id: str, platform: str = "linkedin") -> Optional[LinkedInJob]:
+        """Get a job by platform-specific job ID."""
+        composite_id = f"{platform}_{platform_job_id}"
+        return (
+            self.session.query(LinkedInJob)
+            .filter(
+                (LinkedInJob.linkedin_job_id == composite_id)
+                | (LinkedInJob.platform_job_id == platform_job_id)
+            )
+            .first()
+        )
+
+    def filter_by_platform(self, platform: str, limit: int = 100) -> List[LinkedInJob]:
+        """Get all jobs from a specific platform."""
+        return (
+            self.session.query(LinkedInJob)
+            .filter(LinkedInJob.platform == platform)
+            .order_by(LinkedInJob.scraped_date.desc())
+            .limit(limit)
+            .all()
         )
 
     def get_all(self, limit: int = 100, offset: int = 0) -> List[LinkedInJob]:

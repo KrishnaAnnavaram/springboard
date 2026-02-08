@@ -1,4 +1,9 @@
-"""SQLAlchemy ORM models for Springboard application."""
+"""SQLAlchemy ORM models for Springboard application.
+
+Supports multi-platform job scraping (LinkedIn, Dice, Indeed, Monster,
+Handshake, etc.) with a generic Job model and a LinkedInFeedPost model
+for feed-based hiring post discovery.
+"""
 
 from datetime import datetime
 from typing import Optional
@@ -46,12 +51,26 @@ class User(Base):
 
 
 class LinkedInJob(Base):
-    """Scraped LinkedIn job posting."""
+    """Job posting scraped from any platform.
+
+    Despite the class name ``LinkedInJob`` (kept for backward compatibility
+    with existing code), this model now supports jobs from all platforms
+    via the ``platform`` and ``platform_job_id`` fields.
+
+    The original ``linkedin_job_id`` column is retained as an alias for
+    ``platform_job_id`` for backward-compatible queries.
+    """
 
     __tablename__ = "linkedin_jobs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     linkedin_job_id = Column(String(100), unique=True, nullable=False, index=True)
+    # Multi-platform fields
+    platform = Column(String(50), default="linkedin", nullable=False)
+    platform_job_id = Column(String(200), nullable=True, index=True)
+    application_method = Column(String(50), default="external_link", nullable=True)
+    platform_metadata = Column(JSON, nullable=True)
+
     title = Column(String(500), nullable=False)
     company = Column(String(255), nullable=False)
     company_url = Column(String(500), nullable=True)
@@ -77,10 +96,50 @@ class LinkedInJob(Base):
         Index("ix_jobs_match_score", "match_score"),
         Index("ix_jobs_company", "company"),
         Index("ix_jobs_scraped_date", "scraped_date"),
+        Index("ix_jobs_platform", "platform"),
+        Index("ix_jobs_platform_job_id", "platform_job_id"),
     )
 
     def __repr__(self) -> str:
-        return f"<LinkedInJob(id={self.id}, title='{self.title}', company='{self.company}', score={self.match_score})>"
+        return f"<LinkedInJob(id={self.id}, title='{self.title}', company='{self.company}', platform='{self.platform}', score={self.match_score})>"
+
+
+# Backward-compatible alias
+Job = LinkedInJob
+
+
+class LinkedInFeedPost(Base):
+    """LinkedIn feed post about hiring.
+
+    Captures posts from the LinkedIn feed that mention hiring, job
+    openings, or recruiting — especially for Gen AI / AI Engineer
+    roles.
+    """
+
+    __tablename__ = "linkedin_feed_posts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    post_url = Column(String(1000), unique=True, nullable=False)
+    author_name = Column(String(255), nullable=True)
+    author_profile_url = Column(String(500), nullable=True)
+    post_text = Column(Text, nullable=True)
+    company_mentioned = Column(String(255), nullable=True)
+    posted_date = Column(DateTime, nullable=True)
+    scraped_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    keywords_found = Column(JSON, nullable=True)
+    is_hiring_post = Column(Boolean, default=True, nullable=False)
+    likes = Column(Integer, default=0, nullable=True)
+    comments = Column(Integer, default=0, nullable=True)
+    status = Column(String(50), default="new", nullable=False)  # new, applied, ignored
+    platform = Column(String(50), default="linkedin_feed", nullable=False)
+
+    __table_args__ = (
+        Index("ix_feed_posts_status", "status"),
+        Index("ix_feed_posts_scraped", "scraped_date"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LinkedInFeedPost(id={self.id}, author='{self.author_name}', status='{self.status}')>"
 
 
 class Application(Base):
