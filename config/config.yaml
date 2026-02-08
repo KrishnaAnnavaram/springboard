@@ -1,0 +1,81 @@
+# Springboard Configuration
+
+user:
+  default_name: "Job Seeker"
+  default_email: ""
+  default_phone: ""
+  default_linkedin_url: ""
+
+job_search:
+  titles:
+    - "Software Engineer"
+    - "Senior Software Engineer"
+    - "Full Stack Developer"
+    - "Backend Developer"
+  locations:
+    - "United States"
+    - "Remote"
+  experience_levels:
+    - "Mid-Senior level"
+    - "Associate"
+  job_types:
+    - "Full-time"
+  remote_preference: "Remote"
+  easy_apply_only: true
+  max_jobs_per_search: 50
+
+matching:
+  weights:
+    skills: 0.40
+    experience: 0.25
+    location: 0.15
+    salary: 0.10
+    company: 0.10
+  min_match_score: 60
+  auto_apply_threshold: 80
+
+automation:
+  max_applications_per_day: 20
+  min_delay_between_actions: 3
+  max_delay_between_actions: 8
+  min_delay_between_applications: 60
+  max_delay_between_applications: 600
+  working_hours:
+    start: 9
+    end: 17
+  retry_attempts: 3
+  retry_backoff_factor: 2
+
+linkedin:
+  browser:
+    headless: true
+    window_width: 1920
+    window_height: 1080
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  urls:
+    login: "https://www.linkedin.com/login"
+    jobs: "https://www.linkedin.com/jobs/search/"
+    feed: "https://www.linkedin.com/feed/"
+  selectors:
+    login_email: "#username"
+    login_password: "#password"
+    login_button: "button[type='submit']"
+
+anthropic:
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 4096
+  temperature: 0.3
+  timeout: 60
+
+database:
+  pool_size: 5
+  max_overflow: 10
+  pool_timeout: 30
+  echo: false
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "data/logs/springboard.log"
+  max_bytes: 10485760
+  backup_count: 5
