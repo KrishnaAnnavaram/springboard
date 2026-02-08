@@ -1,7 +1,7 @@
 """Database connection management for Springboard application."""
 
 from contextlib import contextmanager
-from typing import Generator
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session, scoped_session, sessionmaker
 from src.database.models import Base
 from src.utils.config import Config
 
-_engine: Engine | None = None
-_session_factory: scoped_session | None = None
+_engine: Optional[Engine] = None
+_session_factory: Optional[scoped_session] = None
 
 
 def get_engine() -> Engine:
@@ -23,17 +23,19 @@ def get_engine() -> Engine:
         db_config = config.database_config
 
         connect_args = {}
-        if url.startswith("sqlite"):
-            connect_args["check_same_thread"] = False
+        engine_kwargs = {
+            "echo": db_config.get("echo", False),
+        }
 
-        _engine = create_engine(
-            url,
-            pool_size=db_config.get("pool_size", 5) if not url.startswith("sqlite") else 0,
-            max_overflow=db_config.get("max_overflow", 10) if not url.startswith("sqlite") else 0,
-            pool_timeout=db_config.get("pool_timeout", 30) if not url.startswith("sqlite") else 0,
-            echo=db_config.get("echo", False),
-            connect_args=connect_args,
-        )
+        if url.startswith("sqlite"):
+            # SQLite uses StaticPool/NullPool — pool_size is not supported.
+            connect_args["check_same_thread"] = False
+        else:
+            engine_kwargs["pool_size"] = db_config.get("pool_size", 5)
+            engine_kwargs["max_overflow"] = db_config.get("max_overflow", 10)
+            engine_kwargs["pool_timeout"] = db_config.get("pool_timeout", 30)
+
+        _engine = create_engine(url, connect_args=connect_args, **engine_kwargs)
     return _engine
 
 

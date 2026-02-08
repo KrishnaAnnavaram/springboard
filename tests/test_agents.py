@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from src.agents.supervisor import SupervisorAgent
+from src.agents.base.base_scraper import BaseJobScraperAgent
 
 
 class TestSupervisorAgent:

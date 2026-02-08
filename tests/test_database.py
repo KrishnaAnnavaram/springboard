@@ -243,20 +243,20 @@ class TestApplicationRepository:
     def test_get_response_rate(self, db_session, sample_user, sample_jobs):
         repo = ApplicationRepository(db_session)
         # Create applications with different statuses
-        for i, status in enumerate(["submitted", "submitted", "interview", "rejected"]):
-            if i < len(sample_jobs):
-                app = Application(
-                    job_id=sample_jobs[i].id,
-                    user_id=sample_user.id,
-                    status=status,
-                    applied_date=datetime.utcnow(),
-                )
-                db_session.add(app)
+        statuses = ["submitted", "interview", "rejected"]
+        for i, status in enumerate(statuses):
+            app = Application(
+                job_id=sample_jobs[i].id,
+                user_id=sample_user.id,
+                status=status,
+                applied_date=datetime.utcnow(),
+            )
+            db_session.add(app)
         db_session.flush()
 
         rate = repo.get_response_rate()
-        # 2 responded (interview + rejected) out of 4 total = 50%
-        assert rate == 50.0
+        # 2 responded (interview + rejected) out of 3 total = 66.7%
+        assert rate == pytest.approx(66.7, abs=0.1)
 
     def test_get_status_breakdown(self, db_session, sample_application):
         repo = ApplicationRepository(db_session)
@@ -329,6 +329,103 @@ class TestResumeRepository:
     def test_count_for_user(self, db_session, sample_user, sample_resume):
         repo = ResumeRepository(db_session)
         assert repo.count_for_user(sample_user.id) == 1
+
+
+class TestFeedPostRepository:
+    """Tests for FeedPostRepository."""
+
+    def test_create_post(self, db_session):
+        from src.database.repositories.feed_repository import FeedPostRepository
+        repo = FeedPostRepository(db_session)
+        post = repo.create(
+            post_url="https://linkedin.com/feed/update/test1",
+            author_name="Recruiter Test",
+            post_text="We are hiring engineers!",
+            keywords_found=["hiring"],
+            is_hiring_post=True,
+            status="new",
+            platform="linkedin_feed",
+        )
+        assert post.id is not None
+        assert post.author_name == "Recruiter Test"
+        assert post.status == "new"
+
+    def test_get_by_url(self, db_session, sample_feed_posts):
+        from src.database.repositories.feed_repository import FeedPostRepository
+        repo = FeedPostRepository(db_session)
+        post = repo.get_by_url("https://linkedin.com/feed/update/1")
+        assert post is not None
+        assert post.author_name == "John Recruiter"
+
+    def test_get_all(self, db_session, sample_feed_posts):
+        from src.database.repositories.feed_repository import FeedPostRepository
+        repo = FeedPostRepository(db_session)
+        posts = repo.get_all()
+        assert len(posts) == 2
+
+    def test_get_by_status(self, db_session, sample_feed_posts):
+        from src.database.repositories.feed_repository import FeedPostRepository
+        repo = FeedPostRepository(db_session)
+        posts = repo.get_by_status("new")
+        assert len(posts) == 2
+
+    def test_update_status(self, db_session, sample_feed_posts):
+        from src.database.repositories.feed_repository import FeedPostRepository
+        repo = FeedPostRepository(db_session)
+        post = repo.update_status(sample_feed_posts[0].id, "reviewed")
+        assert post.status == "reviewed"
+
+    def test_count_all(self, db_session, sample_feed_posts):
+        from src.database.repositories.feed_repository import FeedPostRepository
+        repo = FeedPostRepository(db_session)
+        assert repo.count_all() == 2
+
+    def test_count_by_status(self, db_session, sample_feed_posts):
+        from src.database.repositories.feed_repository import FeedPostRepository
+        repo = FeedPostRepository(db_session)
+        assert repo.count_by_status("new") == 2
+        assert repo.count_by_status("reviewed") == 0
+
+
+class TestJobRepositoryMultiPlatform:
+    """Tests for multi-platform additions to JobRepository."""
+
+    def test_create_with_platform(self, db_session):
+        repo = JobRepository(db_session)
+        job = repo.create(
+            linkedin_job_id="dice_123",
+            title="Dice Engineer",
+            company="DiceCo",
+            job_url="https://dice.com/jobs/123",
+            platform="dice",
+            platform_job_id="d_123",
+        )
+        assert job.platform == "dice"
+        assert job.platform_job_id == "d_123"
+
+    def test_get_by_platform_job_id(self, db_session):
+        repo = JobRepository(db_session)
+        repo.create(
+            linkedin_job_id="indeed_456",
+            title="Indeed Role",
+            company="IndeedCo",
+            job_url="https://indeed.com/jobs/456",
+            platform="indeed",
+            platform_job_id="i_456",
+        )
+        job = repo.get_by_platform_job_id("i_456", "indeed")
+        assert job is not None
+        assert job.title == "Indeed Role"
+
+    def test_filter_by_platform(self, db_session, sample_jobs):
+        repo = JobRepository(db_session)
+        # sample_jobs default to "linkedin" platform
+        linkedin_jobs = repo.filter_by_platform("linkedin")
+        assert len(linkedin_jobs) == 3
+
+        # No dice jobs exist
+        dice_jobs = repo.filter_by_platform("dice")
+        assert len(dice_jobs) == 0
 
 
 class TestModelRelationships:

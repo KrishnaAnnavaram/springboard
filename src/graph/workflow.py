@@ -1,4 +1,12 @@
-"""LangGraph workflow definition for the Springboard application."""
+"""LangGraph workflow definition for the Springboard application.
+
+Graph layout::
+
+    feed_scrape ──┐
+                  ├──> scrape ──> match ──> supervisor ──┬──> customize ──> apply ──> END
+                  │                           │          │
+                  │                           └──────────┘  (retry / skip logic)
+"""
 
 from typing import Any, Dict
 
@@ -7,6 +15,7 @@ from langgraph.graph import END, StateGraph
 from src.graph.nodes import (
     apply_node,
     customize_node,
+    feed_scrape_node,
     match_node,
     scrape_node,
     supervisor_node,
@@ -18,22 +27,14 @@ logger = get_logger(__name__)
 
 
 def _route_supervisor(state: Dict[str, Any]) -> str:
-    """Conditional edge function for supervisor routing.
-
-    Maps the next_step field to graph node names or END.
-
-    Args:
-        state: Current workflow state.
-
-    Returns:
-        Next node name or END sentinel.
-    """
+    """Conditional edge function for supervisor routing."""
     next_step = state.get("next_step", "end")
     logger.debug("Supervisor routing decision: %s", next_step)
 
+    valid_nodes = {"scrape", "match", "customize", "apply", "feed_scrape"}
     if next_step == "end":
         return END
-    if next_step in ("scrape", "match", "customize", "apply"):
+    if next_step in valid_nodes:
         return next_step
 
     logger.warning("Unknown next_step '%s', ending workflow.", next_step)
@@ -41,31 +42,29 @@ def _route_supervisor(state: Dict[str, Any]) -> str:
 
 
 def build_workflow() -> StateGraph:
-    """Build and return the compiled LangGraph workflow.
+    """Build and return the LangGraph StateGraph.
 
-    The workflow follows this general flow:
-        scrape -> match -> supervisor -> (customize -> apply -> end | end)
-
-    The supervisor can route to any step based on state conditions.
-
-    Returns:
-        Compiled StateGraph ready for execution.
+    Flow:
+        feed_scrape -> scrape -> match -> supervisor -> customize -> apply -> END
+    The supervisor can route back to any step for retries.
     """
     logger.info("Building Springboard workflow graph...")
 
     graph = StateGraph(AppState)
 
-    # Add nodes
+    # Add all nodes
+    graph.add_node("feed_scrape", feed_scrape_node)
     graph.add_node("scrape", scrape_node)
     graph.add_node("match", match_node)
     graph.add_node("customize", customize_node)
     graph.add_node("apply", apply_node)
     graph.add_node("supervisor", supervisor_node)
 
-    # Set entry point
-    graph.set_entry_point("scrape")
+    # Entry point: start with feed scraping
+    graph.set_entry_point("feed_scrape")
 
-    # Define edges
+    # Linear edges
+    graph.add_edge("feed_scrape", "scrape")
     graph.add_edge("scrape", "match")
     graph.add_edge("match", "supervisor")
 
@@ -78,14 +77,13 @@ def build_workflow() -> StateGraph:
             "match": "match",
             "customize": "customize",
             "apply": "apply",
+            "feed_scrape": "feed_scrape",
             END: END,
         },
     )
 
-    # After customize, go to apply
+    # After customize, go to apply; after apply, end
     graph.add_edge("customize", "apply")
-
-    # After apply, end
     graph.add_edge("apply", END)
 
     logger.info("Workflow graph built successfully.")
@@ -93,11 +91,7 @@ def build_workflow() -> StateGraph:
 
 
 def compile_workflow():
-    """Build and compile the workflow graph.
-
-    Returns:
-        Compiled graph ready for invocation.
-    """
+    """Build and compile the workflow graph."""
     graph = build_workflow()
     compiled = graph.compile()
     logger.info("Workflow compiled successfully.")
@@ -112,7 +106,7 @@ def run_workflow(
 
     Args:
         user_profile: User profile data for matching.
-        search_criteria: Job search parameters.
+        search_criteria: Job search parameters (keywords, location, platforms, etc.).
 
     Returns:
         Final workflow state with results.

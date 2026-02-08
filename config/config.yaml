@@ -61,6 +61,40 @@ linkedin:
     login_password: "#password"
     login_button: "button[type='submit']"
 
+platforms:
+  linkedin:
+    enabled: true
+    priority: 1
+  linkedin_feed:
+    enabled: true
+    priority: 2
+    keywords:
+      - "hiring"
+      - "Gen AI"
+      - "Generative AI Engineer"
+      - "we are hiring"
+      - "looking for"
+      - "job opening"
+      - "join our team"
+  dice:
+    enabled: true
+    priority: 3
+  indeed:
+    enabled: true
+    priority: 4
+  monster:
+    enabled: false
+    priority: 5
+  handshake:
+    enabled: false
+    priority: 6
+  glassdoor:
+    enabled: false
+    priority: 7
+  ziprecruiter:
+    enabled: false
+    priority: 8
+
 anthropic:
   model: "claude-sonnet-4-5-20250929"
   max_tokens: 4096

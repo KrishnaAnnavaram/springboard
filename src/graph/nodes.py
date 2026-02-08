@@ -1,13 +1,20 @@
-"""LangGraph node functions for the Springboard workflow."""
+"""LangGraph node functions for the Springboard workflow.
+
+Each node wraps an agent call and translates the result into state updates.
+Agents are self-contained — they read search criteria and user profiles from
+the config / database rather than accepting them as arguments — so nodes
+act primarily as error-boundary wrappers with progress reporting.
+"""
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from src.agents.job_matcher import JobMatcherAgent
 from src.agents.linkedin_applier import LinkedInApplicationAgent
 from src.agents.linkedin_scraper import LinkedInScraperAgent
 from src.agents.resume_customizer import ResumeCustomizerAgent
 from src.agents.supervisor import SupervisorAgent
+from src.agents.orchestrator import OrchestratorAgent
 from src.state.app_state import AppState
 from src.utils.logger import get_logger
 
@@ -15,29 +22,39 @@ logger = get_logger(__name__)
 
 
 def scrape_node(state: AppState) -> Dict[str, Any]:
-    """Execute the LinkedIn scraping step.
+    """Execute the multi-platform scraping step.
 
-    Searches LinkedIn for jobs based on search criteria and saves them to the database.
-
-    Args:
-        state: Current workflow state with search_criteria.
-
-    Returns:
-        Updated state fields with scraped_jobs and current_step.
+    Uses the OrchestratorAgent to scrape jobs across all enabled platforms.
+    Falls back to the legacy LinkedInScraperAgent if the orchestrator fails.
     """
     logger.info("=== SCRAPE NODE: Starting job scraping ===")
 
     try:
-        scraper = LinkedInScraperAgent()
         criteria = state.get("search_criteria", {})
+        keywords = criteria.get("keywords", [])
+        location = criteria.get("location", "")
+        max_jobs = criteria.get("max_jobs", 50)
+        platforms = criteria.get("platforms", None)
 
-        jobs = scraper.run(
-            keywords=criteria.get("keywords", []),
-            location=criteria.get("location", ""),
-            max_jobs=criteria.get("max_jobs", 50),
-        )
-
-        logger.info("Scraped %d jobs from LinkedIn", len(jobs))
+        try:
+            orchestrator = OrchestratorAgent()
+            jobs = orchestrator.scrape_all_platforms(
+                keywords=keywords,
+                location=location,
+                max_jobs=max_jobs,
+                platforms=platforms,
+            )
+            logger.info("Orchestrator scraped %d jobs across platforms", len(jobs))
+        except Exception as orch_err:
+            logger.warning(
+                "Orchestrator failed (%s), falling back to LinkedIn-only scraper",
+                orch_err,
+            )
+            # Fallback: legacy LinkedIn scraper (takes no arguments, reads config)
+            scraper = LinkedInScraperAgent()
+            scraper.run()
+            jobs = scraper.scraped_jobs or []
+            logger.info("Legacy scraper found %d jobs", len(jobs))
 
         return {
             "scraped_jobs": jobs,
@@ -47,7 +64,7 @@ def scrape_node(state: AppState) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error("Scrape node failed: %s", e)
-        errors = state.get("errors", [])
+        errors = list(state.get("errors", []))
         errors.append({
             "step": "scrape",
             "error": str(e),
@@ -63,37 +80,62 @@ def scrape_node(state: AppState) -> Dict[str, Any]:
 def match_node(state: AppState) -> Dict[str, Any]:
     """Execute the job matching step.
 
-    Analyzes scraped jobs against user profile using AI-powered scoring.
-
-    Args:
-        state: Current workflow state with scraped_jobs and user_profile.
-
-    Returns:
-        Updated state fields with matched_jobs and current_step.
+    JobMatcherAgent.run() takes NO arguments — it reads unmatched jobs from
+    the DB, scores them via Claude, and persists scores.  Returns a summary
+    dict ``{processed, succeeded, failed}`` (not a list of jobs).
     """
     logger.info("=== MATCH NODE: Starting job matching ===")
 
     try:
         matcher = JobMatcherAgent()
-        user_profile = state.get("user_profile", {})
+        result = matcher.run()  # no arguments
 
-        matched = matcher.run(user_profile=user_profile)
+        logger.info(
+            "Matcher: %d processed, %d succeeded, %d failed",
+            result.get("processed", 0),
+            result.get("succeeded", 0),
+            result.get("failed", 0),
+        )
 
-        logger.info("Matched %d jobs above threshold", len(matched))
+        # Fetch matched jobs from DB for downstream nodes
+        from src.database.connection import get_db
+        from src.database.repositories.job_repository import JobRepository
 
-        # Build pending applications list from high-scoring matches
-        pending = []
-        for job in matched:
-            if job.get("match_score", 0) >= matcher.config.auto_apply_threshold:
-                pending.append({
-                    "job_id": job["id"],
-                    "job_title": job.get("title", ""),
-                    "company": job.get("company", ""),
-                    "match_score": job.get("match_score", 0),
-                })
+        matched_jobs: List[Dict[str, Any]] = []
+        pending: List[Dict[str, Any]] = []
+
+        with get_db() as session:
+            repo = JobRepository(session)
+            min_score = matcher.config.min_match_score
+            threshold = matcher.config.auto_apply_threshold
+            db_jobs = repo.get_matched_jobs(min_score=min_score)
+
+            for job in db_jobs:
+                job_dict = {
+                    "id": job.id,
+                    "title": job.title,
+                    "company": job.company,
+                    "location": job.location,
+                    "match_score": job.match_score,
+                    "platform": getattr(job, "platform", "linkedin"),
+                }
+                matched_jobs.append(job_dict)
+
+                if job.match_score and job.match_score >= threshold:
+                    pending.append({
+                        "job_id": job.id,
+                        "job_title": job.title,
+                        "company": job.company,
+                        "match_score": job.match_score,
+                    })
+
+        logger.info(
+            "Found %d matched jobs, %d above auto-apply threshold",
+            len(matched_jobs), len(pending),
+        )
 
         return {
-            "matched_jobs": matched,
+            "matched_jobs": matched_jobs,
             "pending_applications": pending,
             "current_step": "match",
             "last_checkpoint": datetime.utcnow().isoformat(),
@@ -101,7 +143,7 @@ def match_node(state: AppState) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error("Match node failed: %s", e)
-        errors = state.get("errors", [])
+        errors = list(state.get("errors", []))
         errors.append({
             "step": "match",
             "error": str(e),
@@ -117,34 +159,24 @@ def match_node(state: AppState) -> Dict[str, Any]:
 def customize_node(state: AppState) -> Dict[str, Any]:
     """Execute the resume customization step.
 
-    Generates tailored resumes and cover letters for matched jobs.
-
-    Args:
-        state: Current workflow state with matched_jobs and user_profile.
-
-    Returns:
-        Updated state fields with customized_resumes and cover_letters.
+    ResumeCustomizerAgent.run() takes NO arguments — it fetches matched jobs
+    from the DB and processes them.  Returns ``List[Dict]`` with per-job
+    results containing job_id, resume_text, cover_letter, status.
     """
     logger.info("=== CUSTOMIZE NODE: Starting resume customization ===")
 
     try:
         customizer = ResumeCustomizerAgent()
-        pending = state.get("pending_applications", [])
+        results = customizer.run()  # no arguments
 
-        resumes = {}
-        cover_letters = {}
+        resumes: Dict[int, str] = {}
+        cover_letters: Dict[int, str] = {}
 
-        for app in pending:
-            job_id = app["job_id"]
-            try:
-                result = customizer.run(job_id=job_id)
-                if result:
-                    resumes[job_id] = result.get("resume_text", "")
-                    cover_letters[job_id] = result.get("cover_letter", "")
-                    logger.info("Customized resume for job %d", job_id)
-            except Exception as e:
-                logger.warning("Failed to customize for job %d: %s", job_id, e)
-                continue
+        for item in results:
+            job_id = item.get("job_id")
+            if job_id and item.get("status") == "success":
+                resumes[job_id] = item.get("resume_text", "")
+                cover_letters[job_id] = item.get("cover_letter", "")
 
         logger.info("Customized %d resumes and cover letters", len(resumes))
 
@@ -157,7 +189,7 @@ def customize_node(state: AppState) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error("Customize node failed: %s", e)
-        errors = state.get("errors", [])
+        errors = list(state.get("errors", []))
         errors.append({
             "step": "customize",
             "error": str(e),
@@ -173,45 +205,32 @@ def customize_node(state: AppState) -> Dict[str, Any]:
 def apply_node(state: AppState) -> Dict[str, Any]:
     """Execute the application submission step.
 
-    Submits applications via LinkedIn Easy Apply for pending jobs.
-
-    Args:
-        state: Current workflow state with pending_applications and customized data.
-
-    Returns:
-        Updated state fields with submitted_applications.
+    LinkedInApplicationAgent.run() takes NO arguments — it reads approved
+    jobs from the DB and submits Easy Apply applications.  Returns a summary
+    dict ``{processed, succeeded, failed, details}``.
     """
     logger.info("=== APPLY NODE: Starting application submission ===")
 
     try:
         applier = LinkedInApplicationAgent()
-        pending = state.get("pending_applications", [])
-        resumes = state.get("customized_resumes", {})
-        cover_letters = state.get("cover_letters", {})
-        submitted = state.get("submitted_applications", [])
+        result = applier.run()  # no arguments
 
-        for app in pending:
-            job_id = app["job_id"]
-            try:
-                result = applier.run(
-                    job_id=job_id,
-                    resume_text=resumes.get(job_id, ""),
-                    cover_letter=cover_letters.get(job_id, ""),
-                )
-                if result and result.get("success"):
-                    submitted.append({
-                        "job_id": job_id,
-                        "job_title": app.get("job_title", ""),
-                        "company": app.get("company", ""),
-                        "applied_at": datetime.utcnow().isoformat(),
-                        "screenshot": result.get("screenshot_path", ""),
-                    })
-                    logger.info("Submitted application for job %d", job_id)
-            except Exception as e:
-                logger.warning("Failed to apply for job %d: %s", job_id, e)
-                continue
+        logger.info(
+            "Applications: %d processed, %d succeeded, %d failed",
+            result.get("processed", 0),
+            result.get("succeeded", 0),
+            result.get("failed", 0),
+        )
 
-        logger.info("Submitted %d applications", len(submitted))
+        submitted = list(state.get("submitted_applications", []))
+        for detail in result.get("details", []):
+            if detail.get("status") == "success":
+                submitted.append({
+                    "job_id": detail.get("job_id"),
+                    "job_title": detail.get("title", ""),
+                    "company": detail.get("company", ""),
+                    "applied_at": datetime.utcnow().isoformat(),
+                })
 
         return {
             "submitted_applications": submitted,
@@ -222,7 +241,7 @@ def apply_node(state: AppState) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error("Apply node failed: %s", e)
-        errors = state.get("errors", [])
+        errors = list(state.get("errors", []))
         errors.append({
             "step": "apply",
             "error": str(e),
@@ -235,17 +254,40 @@ def apply_node(state: AppState) -> Dict[str, Any]:
         }
 
 
+def feed_scrape_node(state: AppState) -> Dict[str, Any]:
+    """Execute the LinkedIn feed scraping step for hiring posts."""
+    logger.info("=== FEED SCRAPE NODE: Scanning LinkedIn feed for hiring posts ===")
+
+    try:
+        orchestrator = OrchestratorAgent()
+        criteria = state.get("search_criteria", {})
+        feed_keywords = criteria.get("feed_keywords", None)
+
+        posts = orchestrator.scrape_feed(feed_keywords=feed_keywords)
+        logger.info("Found %d hiring-related feed posts", len(posts))
+
+        return {
+            "feed_posts": posts,
+            "current_step": "feed_scrape",
+            "last_checkpoint": datetime.utcnow().isoformat(),
+        }
+
+    except Exception as e:
+        logger.error("Feed scrape node failed: %s", e)
+        errors = list(state.get("errors", []))
+        errors.append({
+            "step": "feed_scrape",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+        return {
+            "errors": errors,
+            "current_step": "feed_scrape",
+        }
+
+
 def supervisor_node(state: AppState) -> Dict[str, Any]:
-    """Execute the supervisor routing step.
-
-    Evaluates current state and determines the next workflow step.
-
-    Args:
-        state: Current workflow state.
-
-    Returns:
-        Updated state with next_step and checkpoint info.
-    """
+    """Execute the supervisor routing step."""
     logger.info("=== SUPERVISOR NODE: Evaluating workflow state ===")
 
     supervisor = SupervisorAgent()
