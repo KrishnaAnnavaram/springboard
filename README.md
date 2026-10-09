@@ -84,6 +84,7 @@ This README is the **one location that explains all of Springboard**. It gives t
    - 4.1 [The LangGraph workflow](#41-the-langgraph-workflow)
    - 4.2 [The life cycle of one job](#42-the-life-cycle-of-one-job)
    - 4.3 [Status values](#43-status-values)
+   - 4.4 [Who does which step](#44-who-does-which-step)
 5. 🧠 [The workflow state and the supervisor](#5-the-workflow-state-and-the-supervisor)
 6. 🎛️ [The orchestrator and the platform registry](#6-the-orchestrator-and-the-platform-registry)
 7. 🔵 [The platform scrapers](#7-the-platform-scrapers)
@@ -180,6 +181,53 @@ flowchart LR
 | Logging | `src/utils/logger.py` | Console handler and `RotatingFileHandler` |
 | Dashboard | `src/dashboard/app.py`, `src/dashboard/pages/` | Main page and 9 Streamlit pages |
 
+```mermaid
+flowchart TB
+    subgraph ENTRY["Entry points"]
+        DASH["dashboard/app.py and pages/"]
+        PY["Python caller"]
+    end
+    subgraph GRAPH["Workflow"]
+        WF["graph/workflow.py<br/>build_workflow, run_workflow"]
+        ND["graph/nodes.py<br/>6 node functions"]
+        STT["state/app_state.py<br/>AppState"]
+        SV["supervisor.py<br/>SupervisorAgent"]
+    end
+    subgraph AGENTS["Agents"]
+        OR["orchestrator.py<br/>OrchestratorAgent, registry"]
+        BS["base/base_scraper.py<br/>BaseJobScraperAgent"]
+        SCR["scrapers/<br/>6 registered scrapers"]
+        LS["linkedin_scraper.py<br/>LinkedInScraperAgent"]
+        MA["job_matcher.py<br/>JobMatcherAgent"]
+        CU["resume_customizer.py<br/>ResumeCustomizerAgent"]
+        AP["linkedin_applier.py<br/>LinkedInApplicationAgent"]
+    end
+    subgraph DATA["Database"]
+        REPO["repositories/"]
+        MOD["models.py, connection.py"]
+    end
+    DASH --> WF
+    PY --> WF
+    PY --> OR
+    WF --> ND
+    WF --> STT
+    ND --> SV
+    ND --> OR
+    ND --> LS
+    ND --> MA
+    ND --> CU
+    ND --> AP
+    OR --> SCR
+    SCR --> BS
+    SCR --> LS
+    BS --> REPO
+    MA --> REPO
+    CU --> REPO
+    AP --> REPO
+    DASH --> REPO
+    REPO --> MOD
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -236,6 +284,20 @@ springboard/
 ### 3.1 Each agent reads from the database and writes to the database
 The matcher, the customizer and the applier take no arguments in `run()`. Each one reads its input rows from the database and writes its result rows back. The workflow state carries only counts, IDs and summaries.
 
+```mermaid
+flowchart LR
+    SC["Scrapers"] -- "status new" --> DB[("linkedin_jobs")]
+    DB -- "new, no score" --> MA["Matcher"]
+    MA -- "score, status matched" --> DB
+    DB -- "matched" --> CU["Customizer"]
+    CU -- "resume_customized" --> DB
+    DB -- "approved" --> AP["Applier"]
+    AP -- "applied or apply_failed" --> DB
+    MA -. "counts and summaries" .-> ST["AppState"]
+    CU -. "results" .-> ST
+    AP -. "summary" .-> ST
+```
+
 ### 3.2 One platform failure does not stop the others
 The orchestrator runs each scraper in its own `try` block. An error goes into the error list of the orchestrator, and the next platform starts.
 
@@ -271,7 +333,9 @@ flowchart TB
     SC --> MA["match<br/>JobMatcherAgent.run + matched jobs from DB"]
     MA --> SV{"supervisor<br/>SupervisorAgent.route"}
     SV -- "customize" --> CU["customize<br/>ResumeCustomizerAgent.run"]
-    SV -- "retry: scrape, match, feed_scrape" --> SC
+    SV -- "retry scrape" --> SC
+    SV -- "retry match" --> MA
+    SV -- "retry feed_scrape" --> FS
     SV -- "end" --> END1([END])
     CU --> AP["apply<br/>LinkedInApplicationAgent.run"]
     AP --> END2([END])
@@ -285,7 +349,65 @@ flowchart TB
 
 The graph is compiled with no checkpointer. Each run starts again at the first node.
 
+This diagram shows the full flow of data: the inputs, the database tables, the outputs and the one step that a person must do.
+
+```mermaid
+flowchart TD
+    CFG[/"config.yaml: titles, locations,<br/>platforms, weights"/] --> FEED["feed_scrape:<br/>linkedin_feed scraper"]
+    CFG --> SC["scrape: scraper of<br/>each enabled platform"]
+    ENV[/".env: credentials"/] --> SC
+    ENV --> FEED
+    FEED --> JOBS[("linkedin_jobs table")]
+    SC --> JOBS
+    JOBS -- "status new" --> MA["match:<br/>JobMatcherAgent and Claude"]
+    PROF[("users and resumes tables:<br/>profile, primary resume")] --> MA
+    MA -- "match_score, status matched" --> JOBS
+    JOBS -- "score 60 or more" --> SV{"supervisor:<br/>matched jobs?"}
+    SV -- "no" --> END1[/"END"/]
+    SV -- "yes" --> CU["customize:<br/>ResumeCustomizerAgent and Claude"]
+    PROF --> CU
+    CU -- "status resume_customized" --> JOBS
+    CU --> RES[("resumes table:<br/>tailored resume rows")]
+    JOBS --> HUM{{"HUMAN<br/>Set status approved by hand"}}
+    HUM --> AP["apply: LinkedInApplicationAgent,<br/>Easy Apply, daily cap"]
+    AP --> APPS[("applications table")]
+    AP --> SHOT[/"data/screenshots/ PNG files"/]
+    AP -- "status applied or apply_failed" --> JOBS
+    APPS --> DASH[/"Streamlit dashboard pages"/]
+    JOBS --> DASH
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUM human
+```
+
 ### 4.2 The life cycle of one job
+
+```mermaid
+stateDiagram-v2
+    state "customization_failed" as CF
+    state "apply_failed" as AF
+    state "resume_customized" as RC
+    [*] --> new: save_to_database, platform job ID not in the table
+    new --> matched: update_match_score, for every score
+    matched --> RC: customizer success
+    matched --> CF: customizer error
+    RC --> approved: a person sets it in the database
+    approved --> applied: applier, submission confirmed
+    approved --> AF: applier, failure
+    new --> saved: Jobs page, Save
+    new --> ignored: Jobs page, Ignore
+    applied --> [*]
+    AF --> [*]
+    CF --> [*]
+    note right of approved
+        No code writes approved.
+        See Known problems, item 1.
+    end note
+    note left of saved
+        Save and Ignore can change
+        a job in any status.
+    end note
+```
 
 1. A scraper finds the job on a search page of its platform.
 2. `save_to_database` writes the job with status `new`. It skips the job if the same platform job ID is in the table.
@@ -315,6 +437,59 @@ The graph is compiled with no checkpointer. Each run starts again at the first n
 | Application | `pending`, `viewed`, `interview`, `rejected`, `offer` | Applications page of the dashboard |
 | Feed post | `new`, `reviewed`, `applied`, `dismissed` | Model default and Feed Jobs page |
 
+### 4.4 Who does which step
+
+This sequence shows one run that starts from the Agent Monitor page.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor OP as Operator
+    participant AM as Agent Monitor page
+    participant WF as LangGraph workflow
+    participant OR as OrchestratorAgent
+    participant SC as Platform scraper
+    participant WEB as Job platform
+    participant DB as Database
+    participant MA as JobMatcherAgent
+    participant CL as Claude API
+    participant SV as SupervisorAgent
+    participant CU as ResumeCustomizerAgent
+    participant AP as LinkedInApplicationAgent
+
+    OP->>AM: click Start Workflow
+    AM->>WF: run_workflow in a daemon thread
+    WF->>OR: feed_scrape node, scrape_feed
+    OR->>SC: linkedin_feed scraper run
+    SC->>WEB: login, content search, scroll
+    SC->>DB: save_to_database, status new
+    WF->>OR: scrape node, scrape_all_platforms
+    loop each enabled platform
+        OR->>SC: run(keywords, location, max_jobs)
+        SC->>WEB: login, search_jobs
+        SC->>DB: save_to_database, status new
+    end
+    WF->>MA: match node, run
+    MA->>DB: get_unmatched_jobs, up to 50
+    loop each job
+        MA->>CL: messages.create with the match prompt
+        CL-->>MA: JSON category scores
+        MA->>DB: update_match_score, status matched
+    end
+    WF->>DB: get_matched_jobs, score 60 or more
+    WF->>SV: supervisor node, route
+    SV-->>WF: next_step customize or end
+    WF->>CU: customize node, run
+    CU->>CL: resume prompt, then cover letter prompt
+    CU->>DB: new Resume row, status resume_customized
+    WF->>AP: apply node, run
+    AP->>DB: count_today, jobs with status approved
+    AP->>WEB: Easy Apply form, submit
+    AP->>DB: Application row, status applied or apply_failed
+    WF-->>AM: final state
+    AM-->>OP: counts in the activity log
+```
+
 ---
 
 ## 5. The workflow state and the supervisor
@@ -331,6 +506,29 @@ The graph is compiled with no checkpointer. Each run starts again at the first n
 The `search_criteria` keys that the nodes read are `keywords`, `location`, `max_jobs` (default 50), `platforms` and `feed_keywords`.
 
 **Procedure of `SupervisorAgent.route`**
+
+```mermaid
+flowchart TD
+    IN[/"AppState after the match node"/] --> SN["supervisor_node:<br/>route, then handle_checkpoint"]
+    SN --> E3{"3 or more errors<br/>or iteration above 100?"}
+    E3 -- "yes" --> END1[/"end"/]
+    E3 -- "no" --> HE{"Error list empty?"}
+    HE -- "no" --> RC{"retry_count of the<br/>last error less than 3?"}
+    RC -- "yes" --> RETRY[/"The failed node"/]
+    RC -- "no" --> NEXT[/"_next_after: next node of<br/>scrape, match, customize, apply, end"/]
+    HE -- "yes" --> CS{"current_step"}
+    CS -- "scrape" --> S1{"scraped_jobs?"}
+    S1 -- "yes" --> M[/"match"/]
+    S1 -- "no" --> END1
+    CS -- "match" --> S2{"matched_jobs?"}
+    S2 -- "yes" --> C[/"customize"/]
+    S2 -- "no" --> END1
+    CS -- "customize" --> S3{"pending_applications?"}
+    S3 -- "yes" --> A[/"apply"/]
+    S3 -- "no" --> END1
+    CS -- "apply" --> END1
+    CS -- "other value" --> SCR[/"scrape"/]
+```
 
 1. If the error list has 3 or more entries (`retry_attempts`), return `end`.
 2. If `iteration` is more than 100, return `end`.
@@ -349,6 +547,25 @@ The `search_criteria` keys that the nodes read are `keywords`, `location`, `max_
 ## 6. The orchestrator and the platform registry
 
 **Purpose.** Run the scrapers of all enabled platforms, and give one Python interface to all agents.
+
+```mermaid
+flowchart TD
+    IN[/"keywords, location,<br/>max_jobs, platforms"/] --> P{"platforms given?"}
+    P -- "yes" --> LOOP["For each platform"]
+    P -- "no" --> EN["get_enabled_platforms:<br/>enabled in config.yaml and registered,<br/>sorted by priority"]
+    EN --> NONE{"None enabled?"}
+    NONE -- "yes" --> ALL["All registered platforms"]
+    NONE -- "no" --> LOOP
+    ALL --> LOOP
+    LOOP --> GET["get_scraper_for_platform<br/>from _SCRAPER_REGISTRY"]
+    GET --> RUN["scraper.run"]
+    RUN --> EX{"Exception?"}
+    EX -- "no" --> ADD["Add the jobs,<br/>progress event completed"]
+    EX -- "yes" --> ERR["Add to the error list,<br/>progress event failed"]
+    ADD --> LOOP
+    ERR --> LOOP
+    LOOP -- "all done" --> OUT[/"Combined job list"/]
+```
 
 | Function or method | What it does |
 |---|---|
@@ -374,6 +591,24 @@ The `search_criteria` keys that the nodes read are `keywords`, `location`, `max_
 ### 7.1 The base scraper
 
 **Purpose.** Give all scrapers one interface, one rate limit, one retry rule and one save rule.
+
+```mermaid
+flowchart TD
+    IN[/"keywords, location, max_jobs"/] --> T["Titles: keywords, or config titles,<br/>or Software Engineer"]
+    T --> L["Location: given, or first config location,<br/>or United States"]
+    L --> LOG{"login()"}
+    LOG -- "False" --> CLOSE
+    LOG -- "True" --> EACH{"Next title and<br/>fewer than max_jobs?"}
+    EACH -- "yes" --> S["search_jobs with the number<br/>still needed, log an error"]
+    S --> RL["rate_limit"]
+    RL --> EACH
+    EACH -- "no" --> SAVE["save_to_database"]
+    SAVE --> DUP{"Job ID empty or<br/>already in the table?"}
+    DUP -- "yes" --> SKIP["Skip the job"]
+    DUP -- "no" --> NEW[("linkedin_jobs row,<br/>status new")]
+    SAVE --> CLOSE["close() in finally"]
+    CLOSE --> OUT[/"Scraped job dicts,<br/>empty after a failed login"/]
+```
 
 | Member | Kind | Description |
 |---|---|---|
@@ -407,6 +642,24 @@ The `search_criteria` keys that the nodes read are `keywords`, `location`, `max_
 
 `LinkedInPlatformScraper` (`linkedin`) is an adapter. It sends all browser work to `LinkedInScraperAgent`.
 
+```mermaid
+flowchart TD
+    INIT["_init_driver: Chrome,<br/>CDP script hides navigator.webdriver"] --> LG["login: fill email and password, submit"]
+    LG --> FEED{"URL contains /feed<br/>within 20 s?"}
+    FEED -- "no" --> FAIL[/"False, warning on<br/>checkpoint or challenge"/]
+    FEED -- "yes" --> URL["_build_search_url:<br/>keywords, location, f_AL if easy_apply_only"]
+    URL --> SCR["_scroll_results_panel:<br/>up to 5 scrolls"]
+    SCR --> CARDS["_get_job_cards"]
+    CARDS --> NO{"Cards found?"}
+    NO -- "no" --> OUT[/"Job dicts"/]
+    NO -- "yes" --> EX["_extract_job_from_card:<br/>click, read the detail pane"]
+    EX --> MAX{"max_jobs_per_search<br/>reached?"}
+    MAX -- "yes" --> OUT
+    MAX -- "no" --> NEXT{"_go_to_next_page?"}
+    NEXT -- "yes" --> SCR
+    NEXT -- "no" --> OUT
+```
+
 | Step | Detail |
 |---|---|
 | Browser | Chrome with `--headless=new` (if `linkedin.browser.headless`), 1920 × 1080, the configured user agent. A CDP script hides `navigator.webdriver` |
@@ -429,6 +682,20 @@ The legacy `LinkedInScraperAgent.run()` takes no arguments. It retries the drive
 
 `LinkedInFeedScraperAgent` (`linkedin_feed`) finds posts that announce jobs.
 
+```mermaid
+flowchart LR
+    Q[/"Search query:<br/>feed_keywords or config titles"/] --> LG{"login with<br/>LINKEDIN_EMAIL and LINKEDIN_PASSWORD"}
+    LG -- "fail" --> NONE[/"No posts"/]
+    LG -- "ok" --> SR["Content search URL,<br/>sortBy date_posted"]
+    SR --> SC["Scroll 5 times"]
+    SC --> POST["_extract_feed_post<br/>for each post"]
+    POST --> KW{"Text contains a<br/>hiring keyword?"}
+    KW -- "no" --> DROP["Skip the post"]
+    KW -- "yes" --> FIELDS["Author, post URL from data-urn,<br/>likes, comments, company regex"]
+    FIELDS --> JOB[/"Job dict: Hiring Post title,<br/>first 2000 characters"/]
+    JOB --> SAVE[("linkedin_jobs,<br/>platform linkedin_feed")]
+```
+
 **Procedure**
 
 1. Log in to LinkedIn with `LINKEDIN_EMAIL` and `LINKEDIN_PASSWORD`. Without them, stop.
@@ -444,6 +711,25 @@ If `feed_keywords` is absent, the search queries are the titles in `config.yaml`
 ### 7.4 Dice, Indeed, Monster and Handshake
 
 All four scrapers start a headless Chrome with a fixed user agent. They read result cards with several fallback selectors. Dice, Indeed and Monster remove duplicate IDs in one search and follow the next page link.
+
+```mermaid
+flowchart TD
+    D["Start headless Chrome,<br/>fixed user agent"] --> LG{"login result"}
+    LG -- "handshake: no credentials,<br/>SSO or SAML page" --> STOP[/"No jobs"/]
+    LG -- "dice, monster: optional login<br/>indeed: no login" --> URL["Open the search URL"]
+    URL --> WAIT{"Result cards load?"}
+    WAIT -- "no" --> OUT[/"Job dicts"/]
+    WAIT -- "yes" --> CARDS["Read the cards with<br/>fallback selectors"]
+    CARDS --> ID["Job ID from the URL<br/>or the data-jk attribute"]
+    ID --> DUP{"Dice, Indeed, Monster:<br/>ID already in this search?"}
+    DUP -- "yes" --> SKIP["Skip the card"]
+    DUP -- "no" --> ADD["Add the job with<br/>application_method"]
+    ADD --> MAX{"max_jobs reached?"}
+    MAX -- "yes" --> OUT
+    MAX -- "no" --> NEXT{"Dice, Indeed, Monster:<br/>next page link?"}
+    NEXT -- "yes" --> CARDS
+    NEXT -- "no" --> OUT
+```
 
 | Platform | Login | Search URL | Job ID source | `apply_to_job` |
 |---|---|---|---|---|
@@ -463,6 +749,27 @@ Indeed marks a job as `easy_apply` when the card shows an apply label, else `com
 ## 8. The job matcher
 
 **Purpose.** Give each new job a match score from 0 to 100 and a reasoning text.
+
+```mermaid
+flowchart TD
+    KEY{"ANTHROPIC_API_KEY set?"} -- "no" --> VE[/"ValueError"/]
+    KEY -- "yes" --> USER{"Default user?"}
+    USER -- "no" --> NOU[/"Summary with an error"/]
+    USER -- "yes" --> PROF["_build_user_profile"]
+    PROF --> JOBS["get_unmatched_jobs:<br/>status new, no score, up to 50"]
+    JOBS --> PR["_build_prompt:<br/>job fields and profile fields"]
+    PR --> CALL["_call_claude: messages.create,<br/>retry 429, 5xx, connection errors"]
+    CALL -- "4xx or retries used up" --> FAILED["failed + 1"]
+    CALL --> PARSE{"_parse_response:<br/>valid JSON?"}
+    PARSE -- "no" --> FB["_fallback_scores:<br/>zeros, Unable to evaluate"]
+    PARSE -- "yes" --> CL["_validate_parsed:<br/>clamp each score to 0 to 100"]
+    CL --> SC["_compute_overall_score:<br/>weighted sum"]
+    FB --> SC
+    SC --> RS["generate_reasoning"]
+    RS --> UP[("update_match_score:<br/>match_score, match_reasoning,<br/>status matched")]
+    UP --> SUM[/"processed, succeeded, failed"/]
+    FAILED --> SUM
+```
 
 | Input | Output |
 |---|---|
@@ -512,6 +819,21 @@ The JSON response also has a one-sentence reason for each category, an `overall_
 
 **Purpose.** Write a tailored resume and a cover letter for each matched job.
 
+```mermaid
+flowchart TD
+    U{"Default user and primary<br/>resume with content_text?"} -- "no" --> STOP[/"Empty result list"/]
+    U -- "yes" --> JOBS["get_by_status matched,<br/>up to 100"]
+    JOBS --> EACH["For each job"]
+    EACH --> RES["customize_resume:<br/>Claude, resume prompt"]
+    RES --> CL["generate_cover_letter:<br/>Claude, cover letter prompt"]
+    CL --> SAVE[("Resume row: title - company (date),<br/>is_primary False")]
+    SAVE --> OK["Job status resume_customized"]
+    RES -- "error" --> FAIL["Job status customization_failed"]
+    CL -- "error" --> FAIL
+    OK --> OUT[/"Result list: job_id, resume_id,<br/>cover_letter, status"/]
+    FAIL --> OUT
+```
+
 | Input | Output |
 |---|---|
 | The default user, the primary resume text, jobs with status `matched` | One new `Resume` row for each job, status `resume_customized` or `customization_failed`, a result list |
@@ -540,6 +862,27 @@ Each result has `job_id`, `job_title`, `company`, `resume_id`, `cover_letter` an
 
 **Purpose.** Fill and submit the LinkedIn Easy Apply form, and record the result.
 
+```mermaid
+flowchart TD
+    CNT["count_today"] --> CAP{"Budget left under<br/>MAX_APPLICATIONS_PER_DAY?"}
+    CAP -- "no" --> SKIP[/"skipped_reason:<br/>daily_cap_reached"/]
+    CAP -- "yes" --> APPR["get_by_status approved,<br/>limit = budget left"]
+    HUMAN{{"HUMAN<br/>Sets status approved by hand"}} --> APPR
+    APPR --> HAS{"Application row<br/>exists?"}
+    HAS -- "yes" --> DROP["Skip the job"]
+    HAS -- "no" --> LOOP["For each pending job"]
+    LOOP --> CAP2{"Daily cap reached?"}
+    CAP2 -- "yes" --> REST["Count the rest as skipped"]
+    CAP2 -- "no" --> APPLY["apply_to_job"]
+    APPLY --> WAIT["Wait 60 to 600 s"]
+    WAIT --> LOOP
+    LOOP -- "all done" --> OUT[/"submitted, failed, skipped,<br/>total_processed, errors"/]
+    REST --> OUT
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
+```
+
 | Input | Output |
 |---|---|
 | Jobs with status `approved` and no application row, user 1, the primary resume | An `Application` row, a screenshot, job status `applied` or `apply_failed`, a summary |
@@ -554,6 +897,24 @@ Each result has `job_id`, `job_title`, `company`, `resume_id`, `cover_letter` an
 6. Return `submitted`, `failed`, `skipped`, `total_processed` and `errors`.
 
 **Procedure of `apply_to_job`**
+
+```mermaid
+flowchart TD
+    U["Read the user, phone, profile_data,<br/>primary resume file_path"] --> CLT["_generate_cover_letter:<br/>Claude, under 300 words"]
+    CLT --> NAV{"navigate_to_job?"}
+    NAV -- "no" --> RF["_record_failure: screenshot,<br/>failed row, apply_failed"]
+    NAV -- "yes" --> EA{"click_easy_apply?<br/>5 selectors"}
+    EA -- "no" --> RF
+    EA -- "yes" --> FORM["fill_form: up to 10 pages,<br/>up to 3 attempts"]
+    FORM --> FF{"Form filled?"}
+    FF -- "no" --> RF
+    FF -- "yes" --> SUB["submit_application: Review,<br/>Submit application, up to 3 attempts"]
+    SUB --> VER{"_verify_submission:<br/>confirmation or modal closed?"}
+    VER -- "yes" --> SHOT1["Screenshot<br/>confirmation"]
+    VER -- "no" --> SHOT2["Screenshot<br/>failure"]
+    SHOT1 --> REC[("Application submitted,<br/>job status applied")]
+    SHOT2 --> REC2[("Application failed,<br/>job status apply_failed")]
+```
 
 1. Read the user, the phone, `profile_data` and the `file_path` of the primary resume.
 2. Ask Claude for a cover letter (under 300 words, `max_tokens=1024`, `temperature=0.4`).
@@ -588,6 +949,55 @@ Each result has `job_id`, `job_title`, `company`, `resume_id`, `cover_letter` an
 
 **Purpose.** Keep all jobs, scores, resumes, applications and feed posts in one place.
 
+```mermaid
+erDiagram
+    users ||--o{ applications : makes
+    users ||--o{ resumes : owns
+    linkedin_jobs ||--o{ applications : gets
+    users {
+        int id PK
+        string email UK
+        string name
+        string phone
+        json profile_data
+        json preferences
+    }
+    linkedin_jobs {
+        int id PK
+        string linkedin_job_id UK
+        string platform
+        string platform_job_id
+        string title
+        string company
+        string job_url
+        bool is_easy_apply
+        float match_score
+        string status
+    }
+    applications {
+        int id PK
+        int job_id FK
+        int user_id FK
+        string status
+        datetime applied_date
+        string screenshot_path
+    }
+    resumes {
+        int id PK
+        int user_id FK
+        string version_name
+        string file_path
+        bool is_primary
+    }
+    linkedin_feed_posts {
+        int id PK
+        string post_url UK
+        string author_name
+        json keywords_found
+        string status
+    }
+```
+
 | Table | Model | Key columns |
 |---|---|---|
 | `users` | `User` | `email` (unique), `name`, `phone`, `linkedin_url`, `profile_data` (JSON), `preferences` (JSON) |
@@ -619,6 +1029,21 @@ The response rate is the number of applications with status `interview`, `offer`
 ## 12. The dashboard
 
 **Purpose.** Show the data, edit the profile and start the workflow.
+
+```mermaid
+flowchart LR
+    MAIN["app.py main page"] --> PAGES["9 pages in pages/"]
+    PAGES --> REPO["Repositories through get_db"]
+    REPO --> DB[("Database")]
+    AM["Agent Monitor:<br/>Start Workflow or Restart"] --> TH["Daemon thread<br/>_run_workflow_thread"]
+    TH --> CRIT["Search criteria from config.yaml:<br/>titles, locations, max_jobs_per_search"]
+    CRIT --> WF["run_workflow"]
+    WF --> DB
+    WF --> SS["st.session_state<br/>workflow_state"]
+    JOBS["Jobs page: Save, Ignore"] --> REPO
+    APPS["Applications page:<br/>status, notes, CSV export"] --> REPO
+    SET["Settings page: Test API"] --> CL["Claude API,<br/>max_tokens 10"]
+```
 
 | Page | What it does |
 |---|---|
@@ -679,6 +1104,21 @@ chmod +x run.sh
 ```
 
 `run.sh` finds Python, makes `venv/`, installs `requirements.txt`, copies `.env.example` to `.env` if `.env` is absent, makes the `data/` folders and runs `init_db`.
+
+```mermaid
+flowchart LR
+    PY{"python3 or python<br/>found?"} -- "no" --> ERR[/"ERROR, stop"/]
+    PY -- "yes" --> VENV["Make venv/ if absent"]
+    VENV --> PIP["pip install -r requirements.txt"]
+    PIP --> ENV{".env exists?"}
+    ENV -- "no" --> CP["Copy .env.example to .env"]
+    ENV -- "yes" --> DIRS["mkdir the data/ folders"]
+    CP --> DIRS
+    DIRS --> INIT["python -m src.database.init_db:<br/>tables and default user"]
+    INIT --> START{"--start flag?"}
+    START -- "yes" --> ST["streamlit run<br/>src/dashboard/app.py"]
+    START -- "no" --> NEXT[/"Next steps printed"/]
+```
 
 Manual setup:
 
